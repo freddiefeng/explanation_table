@@ -1,4 +1,3 @@
-import java.io.FileInputStream
 import java.util.Properties
 
 import core._
@@ -10,18 +9,14 @@ import scala.collection._
 import scala.util.control.Breaks._
 
 object Main {
-  final val NUM_DATA_FIELDS = 9
-
-  val conf = new SparkConf()
-    .setAppName("Explanation Table")
-    .setMaster("spark://freddie-Lenovo-Ideapad-Flex-15:7077")
-    .set("spark.executor.memory", "3g")
-    .set("spark.executor.extraJavaOptions", "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
-  val sc = new SparkContext(conf)
-
-//  var filePath: String = null
+  var numDataFields = 9
   var workingDirectory: String = null
   var inputDataFileName: String = null
+  var sparkMaster: String = null
+
+  var conf: SparkConf = null
+  var sc: SparkContext = null
+
   var inputDataSize: Long = 0
   var summaryTableSize: Int = 0
   var sampleTableSize: Long = 0
@@ -38,23 +33,23 @@ object Main {
   var correctedPatternRDD: RDD[CorrectedTuple] = null
 
   def prepareData() {
-    val sourceData = sc.textFile(workingDirectory + inputDataFileName, 4).cache()
-    inputDataRDD = sourceData.map(line => parse(line))
+    val sourceData = sc.textFile(workingDirectory + inputDataFileName)
+    inputDataRDD = sourceData.map(line => parseInputLine(line, numDataFields)).cache()
   }
 
   def prepareSummary() {
-    val topPattern = SummaryTuple(0, NUM_DATA_FIELDS)
-    for (i <- 0 until NUM_DATA_FIELDS) {
+    val topPattern = SummaryTuple(0, numDataFields)
+    for (i <- 0 until numDataFields) {
       topPattern.pattern(i) = "*"
     }
     summaryTable(0) = topPattern
-    val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-    summaryRDD = sc.parallelize(data)
+    //    val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+    var data = Array.empty[SummaryTuple]
+    summaryTable.foreach(pair => data :+= pair._2)
+    summaryRDD = sc.parallelize(data, 8)
   }
 
   def computeEstimate() {
-    //    println("inputDataRDD.count():" + inputDataRDD.count())
-    //    println("summaryRDD.count():" + summaryRDD.count())
     val product = inputDataRDD.cartesian(summaryRDD)
     estimateRDD = product
       .filter(pair => matchPattern(pair._1.attributes, pair._2.pattern))
@@ -76,6 +71,7 @@ object Main {
     val product = estimateRDD.cartesian(summaryRDD)
     richSummaryRDD = product
       .filter(pair => matchPattern(pair._1.dataTuple.attributes, pair._2.pattern))
+//      .coalesce(512)
       .map(
         pair =>
           // TODO: Check if multiplier and id are required
@@ -90,8 +86,12 @@ object Main {
           (diff, RichSummaryTuple(pair._2.pattern, pair._1, pair._2.multiplier, pair._2.p, pair._2.q, pair._2.count, diff))
         }
       )
-      .filter(pair => {pair._1 > bDiffThreshold.value(0)})
-      .sortByKey(false, 4)
+      .filter(
+        pair => {
+          pair._1 > bDiffThreshold.value(0)
+        }
+      )
+      .sortByKey(false)
       .map(pair => pair._2)
   }
 
@@ -102,7 +102,6 @@ object Main {
         pair => {
           val pattern = generatePattern(pair._1.dataTuple.attributes, pair._2.attributes)
           (pattern.mkString("-"), Array(1.0, pair._1.dataTuple.p, pair._1.q))
-//          (Pattern(pattern), Array(1.0, pair._1.dataTuple.p, pair._1.q))
         }
       )
       .reduceByKey(
@@ -138,8 +137,6 @@ object Main {
   }
 
   def computeCorrectedStats() {
-    //    case class ReductionKey(pattern: Array[String], count: Long, p: Double, q: Double) extends Serializable
-
     val product = aggregatedRDD.cartesian(sampleRDD)
     correctedPatternRDD = product
       .filter(
@@ -147,78 +144,43 @@ object Main {
           matchPattern(pair._2.attributes, pair._1.pattern)
         }
       )
-      //    println("product.count():" + product.count())
-      //    aggregatedRDD.take(50).foreach(x => printTuples(x.pattern))
       .map(
         pair => {
           // TODO: Verify that getting rid of count, p and q as part of the key is fine
           (pair._1.pattern.mkString("-"), Array(pair._1.p, pair._1.q, pair._1.count, 1))
         }
       )
-//    partial.collect().foreach(pair => {
-//      val p = pair._2(0)
-//      val q = pair._2(1)
-//      val count = pair._2(2).toLong
-//      val newP = p / count
-//      if (newP.isNaN) {
-//        println(p, q, count, pair._2(2), pair._1)
-//      }
-//    })
-        .reduceByKey(
+      .reduceByKey(
         (left, right) => {
           left(3) += right(3)
           left
         }
       )
-        .map(
-          pair => {
-            val p = pair._2(0)
-            val q = pair._2(1)
-            val count = pair._2(2).toLong
-            val numSampleMatch = pair._2(3).toInt
-            val gain = calculateGain(p, q, count, numSampleMatch)
-            val t = CorrectedTuple(
-              pair._1.split("-"),
-              count / numSampleMatch,
-              p / count,
-              q / count,
-              gain,
-              calculateMultiplier(p, q),
-              numSampleMatch
-            )
-            (gain, t)
-            //          (p, t)
-          }
-        )
-        .sortByKey(false, 4)
-        .map(pair => pair._2)
+      .map(
+        pair => {
+          val p = pair._2(0)
+          val q = pair._2(1)
+          val count = pair._2(2).toLong
+          val numSampleMatch = pair._2(3).toInt
+          val gain = calculateGain(p, q, count, numSampleMatch)
+          val t = CorrectedTuple(
+            pair._1.split("-"),
+            count / numSampleMatch,
+            p / count,
+            q / count,
+            gain,
+            calculateMultiplier(p, q),
+            numSampleMatch
+          )
+          (gain, t)
+          //          (p, t)
+        }
+      )
+      .sortByKey(false, 4)
+      .map(pair => pair._2)
   }
 
-  def parse(line: String): DataTuple = {
-    val fields = line.split(",")
-    assert(fields.length == 2 + NUM_DATA_FIELDS)
-    val ret = DataTuple(fields(0).toLong, fields(1).toShort, NUM_DATA_FIELDS)
-    for (i <- 2 until fields.length) {
-      ret.attributes(i - 2) = fields(i)
-    }
-    ret
-  }
-
-  def main(args: Array[String]) {
-
-    //    val test_string: Array[String] = Array("0", "2", null, null, "001", null, "999", null, null)
-    //    val test_string: Array[String] = Array("0", "2", "", "", "001", "", "999", "", "")
-    //    val test_pattern: Array[String] = Array(null, null, null, null, null, null, null, null, null)
-    //
-    ////    val test_output = generateAncestors(test_string, 0)
-    ////    test_output.foreach(pattern => {
-    ////      pattern.content.foreach(field => print(field + ","))
-    ////      println()
-    ////    })
-    //    println(matchPattern(test_string, test_pattern))
-    //    return
-
-    //TODO: Read it from config file or some sort
+  def loadConfig() {
     val properties = new Properties()
     properties.load(getClass.getResourceAsStream("config"))
     summaryTableSize = properties.getProperty("summaryTableSize").toInt
@@ -227,6 +189,23 @@ object Main {
     if (!(workingDirectory.takeRight(1) equals "/"))
       workingDirectory += "/"
     inputDataFileName = properties.getProperty("inputDataFileName")
+    sparkMaster = properties.getProperty("sparkMaster")
+    numDataFields = properties.getProperty("numDataFields").toInt
+  }
+
+  def main(args: Array[String]) {
+    var start_time: Long = 0
+    var end_time: Long = 0
+    loadConfig()
+
+    conf = new SparkConf()
+      .setAppName("Explanation Table")
+      .setMaster(sparkMaster)
+      //      .set("spark.executor.memory", "3g")
+      .set("spark.executor.extraJavaOptions", "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
+      .set("spark.eventLog.enabled", "true")
+      .set("spark.eventLog.dir", workingDirectory + "/sparkevents")
+    sc = new SparkContext(conf)
 
     prepareData()
     inputDataSize = inputDataRDD.count()
@@ -236,13 +215,13 @@ object Main {
     prepareSummary()
 
     for (i <- 0 until summaryTableSize) {
+      start_time = System.currentTimeMillis()
+
       breakable {
         while (true) {
           computeEstimate()
-          //          println("estimateRDD.count() " + estimateRDD.count())
+          estimateRDD.cache()
           computeRichSummary()
-
-          //          println("richSummaryRDD.count() " + richSummaryRDD.count())
 
           if (richSummaryRDD.count() == 0) {
             break
@@ -252,52 +231,50 @@ object Main {
             println(topPattern.flatten, multiplier)
 
             summaryTable.get(topPattern.id) match {
-              case Some(pair) => {
-                pair.multiplier = multiplier
-                summaryTable.updated(topPattern.id, multiplier)
-                val newSummaries: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-                summaryRDD = sc.parallelize(newSummaries)
+              case Some(tuple) => {
+                tuple.multiplier = multiplier
+                summaryTable.update(topPattern.id, tuple)
+                //                val newSummaries: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+                var newSummaries = Array.empty[SummaryTuple]
+                summaryTable.foreach(pair => newSummaries :+= pair._2)
+                summaryRDD = sc.parallelize(newSummaries, 8)
               }
               case None => {
                 Console.err.println("Summary ID not found!")
               }
             }
+
+            estimateRDD.unpersist()
           }
         }
       }
 
-      println("Convergence Loop Done")
+      end_time = System.currentTimeMillis()
 
-      //      val sourceData = sc.textFile("hdfs://localhost:9000/explanation_table/sample.csv", 4).cache()
-      //      sampleRDD = sourceData.map(line => parse(line))
+      println("Step 1: Convergence loop done. Time taken:" + (end_time - start_time))
 
+      start_time = System.currentTimeMillis()
       sampleRDD = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, 99)
 
       // Cache the two RDD for an expensive join
       sampleRDD.cache()
-      estimateRDD.cache()
-//      println("sampleRDD.count():" + sampleRDD.count() + " estimateRDD.count():" + estimateRDD.count())
 
+      end_time = System.currentTimeMillis()
+      println("Step 2: Sampling done. Time taken:" + (end_time - start_time))
+
+      start_time = System.currentTimeMillis()
       computeLCA()
-      //      LCARDD.map(lca => {
-      //        lca.flatten
-      //      }).saveAsTextFile("hdfs://localhost:9000/explanation_table/LCARDD.csv")
-      println("LCARDD.count():" + LCARDD.count())
+      //      println("LCARDD.count():" + LCARDD.count())
 
       computeHierarchy()
-      //      aggregatedRDD.map(lca => {
-      //        lca.flatten
-      //      }).saveAsTextFile("hdfs://localhost:9000/explanation_table/aggregatedRDD.csv")
-      println("aggregatedRDD.count():" + aggregatedRDD.count())
+      //      println("aggregatedRDD.count():" + aggregatedRDD.count())
 
       computeCorrectedStats()
-      //      val pattern = correctedPatternRDD.collect()
       val topPattern = correctedPatternRDD.first()
-//      correctedPatternRDD.map(t => t.flatten).saveAsTextFile("hdfs://localhost:9000/explanation_table/correctedPatternRDD.csv")
       val newEntry =
         SummaryTuple(
           summaryTable.size,
-          NUM_DATA_FIELDS,
+          numDataFields,
           topPattern.count,
           topPattern.q,
           topPattern.multiplier
@@ -309,17 +286,17 @@ object Main {
       summaryTable(summaryTable.size) = newEntry
 
       //TODO: Refactor the following
-      val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-      summaryRDD = sc.parallelize(data)
+      //      val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+      var newSummaries = Array.empty[SummaryTuple]
+      summaryTable.foreach(pair => newSummaries :+= pair._2)
+      summaryRDD = sc.parallelize(newSummaries, 8)
 
-      //    val top = correctedPatternRDD.collect()(0)
-      //    val pattern = top.pattern.mkString("-")
-      //    println("correctedPatternRDD.first():" + pattern + " " + top.gain
-      //      + " " + top.p + " " + top.q + " " + top.count + " " + top.numMatch)
-      //    println("correctedPatternRDD.count():" + correctedPatternRDD.count())
-
+      end_time = System.currentTimeMillis()
+      println("Step 3: Generate new rules done. Time taken:" + (end_time - start_time))
     }
 
-    summaryRDD.map(t => t.flatten).saveAsTextFile("hdfs://localhost:9000/explanation_table/summaryRDD.csv")
+    //    summaryRDD.map(t => t.flatten).saveAsTextFile(workingDirectory + "summaryRDD.csv")
+
+    sc.stop()
   }
 }

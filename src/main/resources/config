@@ -1,4 +1,6 @@
 summaryTableSize = 5
-sampleTableSize = 200
-workingDirectory = hdfs://localhost:9000/explanation_table
-inputDataFileName = income_small.csv
+sampleTableSize = 16
+workingDirectory = hdfs://gho-admin:9000/user/freddie/spark/explanation_table
+inputDataFileName = income.csv
+numDataFields = 9
+sparkMaster = yarn-cluster

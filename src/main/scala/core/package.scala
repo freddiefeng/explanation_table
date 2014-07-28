@@ -94,10 +94,20 @@ package object core {
       multiplier - 9
     } else if (p == 1.0) {
       multiplier + 9
-    } else if (q == 1.0) {
+    } else if (q == 0.0) {
       multiplier + 9
     } else {
       multiplier + Math.log(p / q) / Math.log(2) + Math.log((1 - q) / (1 - p)) / Math.log(2)
     }
+  }
+
+  def parseInputLine(line: String, numDataFields: Int): DataTuple = {
+    val fields = line.split(",")
+    assert(fields.length == 2 + numDataFields)
+    val ret = DataTuple(fields(0).toLong, fields(1).toShort, numDataFields)
+    for (i <- 2 until fields.length) {
+      ret.attributes(i - 2) = fields(i)
+    }
+    ret
   }
 }
