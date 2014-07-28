@@ -1,4 +1,6 @@
 summaryTableSize = 5
 sampleTableSize = 200
-workingDirectory = hdfs://localhost:9000/explanation_table
-inputDataFileName = income_small.csv
+workingDirectory = hdfs://localhost:9000/user/hive/warehouse/income
+inputDataFileName = income.csv
+numDataFields = 9
+sparkMaster = spark://freddie-Lenovo-Ideapad-Flex-15:7077
