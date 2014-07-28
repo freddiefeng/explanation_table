@@ -1,0 +1,4 @@
+summaryTableSize = 5
+sampleTableSize = 200
+workingDirectory = hdfs://localhost:9000/explanation_table
+inputDataFileName = income_small.csv
