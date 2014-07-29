@@ -1,11 +1,18 @@
+import java.io.{BufferedWriter, OutputStreamWriter}
+import java.net.URI
 import java.util.Properties
 
 import core._
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{Path, FileSystem}
 import org.apache.spark.SparkContext._
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 
 import scala.collection._
+import scala.collection.mutable.ListBuffer
+import scala.util.Random
 import scala.util.control.Breaks._
 
 object Main {
@@ -24,13 +31,18 @@ object Main {
   var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
 
   var inputDataRDD: RDD[DataTuple] = null
-  var summaryRDD: RDD[SummaryTuple] = null
+
   var estimateRDD: RDD[EstimateTuple] = null
   var richSummaryRDD: RDD[RichSummaryTuple] = null
-  var sampleRDD: RDD[DataTuple] = null
+
+  var sampleTable: Array[DataTuple] = null
+  var bSampleTable: Broadcast[Array[DataTuple]] = null
+
   var LCARDD: RDD[LCATuple] = null
   var aggregatedRDD: RDD[LCATuple] = null
   var correctedPatternRDD: RDD[CorrectedTuple] = null
+
+  val rand = new Random(System.currentTimeMillis())
 
   def prepareData() {
     val sourceData = sc.textFile(workingDirectory + inputDataFileName, 4).cache()
@@ -43,22 +55,34 @@ object Main {
       topPattern.pattern(i) = "*"
     }
     summaryTable(0) = topPattern
-    val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-    summaryRDD = sc.parallelize(data)
   }
 
   def computeEstimate() {
-    val product = inputDataRDD.cartesian(summaryRDD)
-    estimateRDD = product
-      .filter(pair => matchPattern(pair._1.attributes, pair._2.pattern))
-      .map(pair => (pair._1.flatten, pair._2.multiplier))
-      .reduceByKey((left, right) => left + right)
-      .map(
-        pair => {
-          val power2 = Math.pow(2, pair._2)
-          EstimateTuple(DataTuple(pair._1), (power2 / (power2 + 1)).toFloat)
-        }
-      )
+    val bSummaryTable = sc.broadcast(summaryTable.map(_._2).toArray)
+    estimateRDD =
+      inputDataRDD
+        .flatMap(
+          t => {
+            val summaryTable = bSummaryTable.value
+            val ret = ListBuffer.empty[(String, Double)]
+            summaryTable.foreach(
+              summary => {
+                if (matchPattern(t.attributes, summary.pattern)) {
+                  val pair = (t.flatten, summary.multiplier)
+                  ret += pair
+                }
+              }
+            )
+            ret.toList
+          }
+        )
+        .reduceByKey((left, right) => left + right)
+        .map(
+          pair => {
+            val power2 = Math.pow(2, pair._2)
+            EstimateTuple(DataTuple(pair._1), (power2 / (power2 + 1)).toFloat)
+          }
+        )
   }
 
   // TODO: Simplify this function
@@ -66,13 +90,22 @@ object Main {
     case class ReductionValue(pattern: Array[String], multiplier: Double, var p: Float, var q: Float, var count: Long = 1)
 
     val bDiffThreshold = sc.broadcast(Array(diffThreshold))
-    val product = estimateRDD.cartesian(summaryRDD)
-    richSummaryRDD = product
-      .filter(pair => matchPattern(pair._1.dataTuple.attributes, pair._2.pattern))
-      .map(
-        pair =>
-          // TODO: Check if multiplier and id are required
-          (pair._2.id, ReductionValue(pair._2.pattern, pair._2.multiplier, pair._1.dataTuple.p, pair._1.q, 1))
+    val bSummaryTable = sc.broadcast(summaryTable.map(_._2).toArray)
+    richSummaryRDD = estimateRDD
+      .flatMap(
+        t => {
+          val summaryTable = bSummaryTable.value
+          val ret = ListBuffer.empty[(Int, ReductionValue)]
+          summaryTable.foreach(
+            summary => {
+              if (matchPattern(t.dataTuple.attributes, summary.pattern)) {
+                val pair = (summary.id, ReductionValue(summary.pattern, summary.multiplier, t.dataTuple.p, t.q, 1))
+                ret += pair
+              }
+            }
+          )
+          ret.toList
+        }
       )
       .reduceByKey((left, right) => ReductionValue(left.pattern, left.multiplier, left.p + right.p, right.q + left.q, left.count + right.count))
       .map(
@@ -83,20 +116,31 @@ object Main {
           (diff, RichSummaryTuple(pair._2.pattern, pair._1, pair._2.multiplier, pair._2.p, pair._2.q, pair._2.count, diff))
         }
       )
-      .filter(pair => {
-      pair._1 > bDiffThreshold.value(0)
-    })
+      .filter(
+        pair => {
+          pair._1 > bDiffThreshold.value(0)
+        }
+      )
       .sortByKey(false, 4)
       .map(pair => pair._2)
   }
 
   def computeLCA() {
-    val product = estimateRDD.cartesian(sampleRDD)
+    val product = estimateRDD
+    val bSampleTable = sc.broadcast(sampleTable)
     LCARDD = product
-      .map(
-        pair => {
-          val pattern = generatePattern(pair._1.dataTuple.attributes, pair._2.attributes)
-          (pattern.mkString("-"), Array(1.0, pair._1.dataTuple.p, pair._1.q))
+      .flatMap(
+        t => {
+          val sampleDataTable = bSampleTable.value
+          val ret = ListBuffer.empty[(String, Array[Double])]
+          sampleDataTable.foreach(
+            sample => {
+              val pattern = generatePattern(t.dataTuple.attributes, sample.attributes)
+              val pair = (pattern.mkString("-"), Array(1.0, t.dataTuple.p, t.q))
+              ret += pair
+            }
+          )
+          ret.toList
         }
       )
       .reduceByKey(
@@ -109,6 +153,7 @@ object Main {
           LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
         }
       )
+    bSampleTable.unpersist()
   }
 
   def computeHierarchy() {
@@ -132,17 +177,20 @@ object Main {
   }
 
   def computeCorrectedStats() {
-    val product = aggregatedRDD.cartesian(sampleRDD)
+    val bSampleTable = sc.broadcast(sampleTable)
+    val product = aggregatedRDD
     correctedPatternRDD = product
-      .filter(
-        pair => {
-          matchPattern(pair._2.attributes, pair._1.pattern)
-        }
-      )
-      .map(
-        pair => {
-          // TODO: Verify that getting rid of count, p and q as part of the key is fine
-          (pair._1.pattern.mkString("-"), Array(pair._1.p, pair._1.q, pair._1.count, 1))
+      .flatMap(
+        t => {
+          val sampleDataTable = bSampleTable.value
+          val ret = ListBuffer.empty[(String, Array[Double])]
+          sampleDataTable.foreach(sample => {
+            if (matchPattern(sample.attributes, t.pattern)) {
+              val pair = (t.pattern.mkString("-"), Array(t.p, t.q, t.count, 1))
+              ret += pair
+            }
+          })
+          ret.toList
         }
       )
       .reduceByKey(
@@ -168,11 +216,11 @@ object Main {
             numSampleMatch
           )
           (gain, t)
-          //          (p, t)
         }
       )
       .sortByKey(false, 4)
       .map(pair => pair._2)
+    bSampleTable.unpersist()
   }
 
   def loadConfig() {
@@ -202,6 +250,7 @@ object Main {
 
     prepareData()
     inputDataSize = inputDataRDD.count()
+    println("Data size: " + inputDataSize + " rows")
     diffThreshold = inputDataSize / 5000 + 1
     println("diffThreshold:" + diffThreshold)
 
@@ -226,8 +275,6 @@ object Main {
               case Some(pair) => {
                 pair.multiplier = multiplier
                 summaryTable.updated(topPattern.id, multiplier)
-                val newSummaries: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-                summaryRDD = sc.parallelize(newSummaries)
               }
               case None => {
                 Console.err.println("Summary ID not found!")
@@ -242,10 +289,8 @@ object Main {
       println("Step 1: Convergence loop done. Time taken:" + (end_time - start_time))
 
       start_time = System.currentTimeMillis()
-      sampleRDD = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, 99)
+      sampleTable = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000)).collect()
 
-      // Cache the two RDD for an expensive join
-      sampleRDD.cache()
       estimateRDD.cache()
 
       end_time = System.currentTimeMillis()
@@ -274,14 +319,19 @@ object Main {
       println("newEntry.flatten:" + newEntry.flatten)
       summaryTable(summaryTable.size) = newEntry
 
-      //TODO: Refactor the following
-      val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-      summaryRDD = sc.parallelize(data)
-
       end_time = System.currentTimeMillis()
       println("Step 3: Generate new rules done. Time taken:" + (end_time - start_time))
     }
 
-    summaryRDD.map(t => t.flatten).saveAsTextFile(workingDirectory + "summaryRDD.csv")
+    val configuration = new Configuration()
+    //TODO: Change the hdfs host
+    val hdfs = FileSystem.get(new URI("hdfs://localhost:9000"), configuration)
+    val path = new Path(workingDirectory + "summaryRDD.csv")
+    if (hdfs.exists(path))
+      hdfs.delete(path, true)
+    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
+    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
+    bufferedWriter.close()
+    println(summaryTable.size, workingDirectory + "summaryRDD.csv")
   }
 }
