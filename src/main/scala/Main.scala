@@ -157,23 +157,7 @@ object Main {
   }
 
   def computeHierarchy() {
-    aggregatedRDD =
-      LCARDD
-        .flatMap(
-          tuple => {
-            generateAncestors(tuple.pattern, 0).toList.map(key => (key.content.mkString("-"), Array(tuple.count, tuple.p, tuple.q)))
-          }
-        )
-        .reduceByKey(
-          (left, right) => {
-            (left, right).zipped map (_ + _)
-          }
-        )
-        .map(
-          pair => {
-            LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
-          }
-        )
+    aggregatedRDD = LCARDD
   }
 
   def computeCorrectedStats() {
