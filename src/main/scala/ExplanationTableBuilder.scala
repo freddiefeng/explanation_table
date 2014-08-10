@@ -1,10 +1,10 @@
-import java.io.{BufferedWriter, OutputStreamWriter}
+import java.io.{IOException, BufferedWriter, OutputStreamWriter}
 import java.net.URI
 import java.util.Properties
 
 import core._
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path, FileSystem}
+import org.apache.hadoop.fs.{FileStatus, Path, FileSystem}
 import org.apache.spark.SparkContext._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
@@ -15,11 +15,14 @@ import scala.collection.mutable.ListBuffer
 import scala.util.Random
 import scala.util.control.Breaks._
 
-object Main {
+object ExplanationTableBuilder {
   var numDataFields = 9
   var workingDirectory: String = null
   var inputDataFileName: String = null
   var sparkMaster: String = null
+  var hostAddress: String = null
+
+  val statOutput = new StringBuilder
 
   var conf: SparkConf = null
   var sc: SparkContext = null
@@ -45,7 +48,7 @@ object Main {
   val rand = new Random(System.currentTimeMillis())
 
   def prepareData() {
-    val sourceData = sc.textFile(workingDirectory + inputDataFileName, 4).cache()
+    val sourceData = sc.textFile(hostAddress + workingDirectory + inputDataFileName, 4).cache()
     inputDataRDD = sourceData.map(line => parseInputLine(line, numDataFields))
   }
 
@@ -126,9 +129,8 @@ object Main {
   }
 
   def computeLCA() {
-    val product = estimateRDD
     val bSampleTable = sc.broadcast(sampleTable)
-    LCARDD = product
+    LCARDD = estimateRDD
       .flatMap(
         t => {
           val sampleDataTable = bSampleTable.value
@@ -228,12 +230,27 @@ object Main {
     properties.load(getClass.getResourceAsStream("config"))
     summaryTableSize = properties.getProperty("summaryTableSize").toInt
     sampleTableSize = properties.getProperty("sampleTableSize").toInt
+    hostAddress = properties.getProperty("hostAddress")
     workingDirectory = properties.getProperty("workingDirectory")
     if (!(workingDirectory.takeRight(1) equals "/"))
       workingDirectory += "/"
     inputDataFileName = properties.getProperty("inputDataFileName")
     sparkMaster = properties.getProperty("sparkMaster")
     numDataFields = properties.getProperty("numDataFields").toInt
+  }
+
+  def postProcess() {
+    val configuration = new Configuration()
+    //TODO: Change the hdfs host
+    val hdfs = FileSystem.get(new URI(hostAddress), configuration)
+    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
+    if (hdfs.exists(path))
+      hdfs.delete(path, true)
+    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
+    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
+    bufferedWriter.write(statOutput.toString())
+
+    bufferedWriter.close()
   }
 
   def main(args: Array[String]) {
@@ -246,13 +263,17 @@ object Main {
       .setMaster(sparkMaster)
       .set("spark.executor.memory", "3g")
       .set("spark.executor.extraJavaOptions", "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
+      .set("spark.eventLog.enabled", "true")
+      .set("spark.eventLog.dir", hostAddress + workingDirectory + "/sparkevents")
     sc = new SparkContext(conf)
 
     prepareData()
     inputDataSize = inputDataRDD.count()
-    println("Data size: " + inputDataSize + " rows")
+    //    println("Data size: " + inputDataSize + " rows")
+    statOutput ++= "Data size: " + inputDataSize + " rows" + "\n"
     diffThreshold = inputDataSize / 5000 + 1
-    println("diffThreshold:" + diffThreshold)
+    //    println("diffThreshold:" + diffThreshold)
+    statOutput ++= "diffThreshold:" + diffThreshold + "\n"
 
     prepareSummary()
 
@@ -269,7 +290,7 @@ object Main {
           } else {
             val topPattern = richSummaryRDD.first()
             val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
-            println(topPattern.flatten, multiplier)
+            //            println(topPattern.flatten, multiplier)
 
             summaryTable.get(topPattern.id) match {
               case Some(pair) => {
@@ -287,6 +308,7 @@ object Main {
       end_time = System.currentTimeMillis()
 
       println("Step 1: Convergence loop done. Time taken:" + (end_time - start_time))
+      statOutput ++= "Step 1: Convergence loop done. Time taken:" + (end_time - start_time) + "\n"
 
       start_time = System.currentTimeMillis()
       sampleTable = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000)).collect()
@@ -295,13 +317,14 @@ object Main {
 
       end_time = System.currentTimeMillis()
       println("Step 2: Sampling done. Time taken:" + (end_time - start_time))
+      statOutput ++= "Step 2: Sampling done. Time taken:" + (end_time - start_time) + "\n"
 
       start_time = System.currentTimeMillis()
       computeLCA()
-      println("LCARDD.count():" + LCARDD.count())
+      //      println("LCARDD.count():" + LCARDD.count())
 
       computeHierarchy()
-      println("aggregatedRDD.count():" + aggregatedRDD.count())
+      //      println("aggregatedRDD.count():" + aggregatedRDD.count())
 
       computeCorrectedStats()
       val topPattern = correctedPatternRDD.first()
@@ -316,22 +339,16 @@ object Main {
       for (i <- 0 until newEntry.pattern.size) {
         newEntry.pattern(i) = topPattern.pattern(i)
       }
-      println("newEntry.flatten:" + newEntry.flatten)
+      //      println("newEntry.flatten:" + newEntry.flatten)
       summaryTable(summaryTable.size) = newEntry
 
       end_time = System.currentTimeMillis()
       println("Step 3: Generate new rules done. Time taken:" + (end_time - start_time))
+      statOutput ++= "Step 3: Generate new rules done. Time taken:" + (end_time - start_time) + "\n"
     }
 
-    val configuration = new Configuration()
-    //TODO: Change the hdfs host
-    val hdfs = FileSystem.get(new URI("hdfs://localhost:9000"), configuration)
-    val path = new Path(workingDirectory + "summaryRDD.csv")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
-    bufferedWriter.close()
-    println(summaryTable.size, workingDirectory + "summaryRDD.csv")
+    sc.stop()
+
+    postProcess()
   }
 }
