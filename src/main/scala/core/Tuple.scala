@@ -20,10 +20,11 @@ case class DataTuple (id: Long, p: Short, numDataFields: Int) extends Tuple {
 object DataTuple {
   def apply(flatten: String): DataTuple = {
     val fields = flatten.split(", ")
-    val attributes = fields.slice(0, 9)
-    val id = fields(9).toLong
-    val p = fields(10).toShort
-    val numDataFields = fields(11).toInt
+    val length = fields.length
+    val attributes = fields.slice(0, length - 3)
+    val id = fields(length - 3).toLong
+    val p = fields(length - 2).toShort
+    val numDataFields = fields(length - 1).toInt
     val ret = DataTuple(id, p, numDataFields)
     ret.attributes = attributes
     ret

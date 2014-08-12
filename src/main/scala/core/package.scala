@@ -1,6 +1,10 @@
 import scala.collection.mutable.ListBuffer
 
 package object core {
+  private val ln2 = scala.math.log(2)
+
+  def log2(x: Double) = scala.math.log(x) / ln2
+
   def printTuples(t: Array[String]) {
     t.foreach(field => print(field + ","))
     println()
@@ -94,7 +98,7 @@ package object core {
       multiplier - 9
     } else if (p == 1.0) {
       multiplier + 9
-    } else if (q == 1.0) {
+    } else if (q == 0.0) {
       multiplier + 9
     } else {
       multiplier + Math.log(p / q) / Math.log(2) + Math.log((1 - q) / (1 - p)) / Math.log(2)
@@ -109,5 +113,19 @@ package object core {
       ret.attributes(i - 2) = fields(i)
     }
     ret
+  }
+
+  def computeKL(t: EstimateTuple): Double = {
+    val p = t.dataTuple.p.toFloat
+    val q = t.q
+    assert(scala.math.abs(p) <= 1.0 && scala.math.abs(q) <= 1.0)
+    t match {
+      case _ if p equals q => 0
+      case _ if p == 1.0 && q == 0.0 => 9
+      case _ if p == 1.0 => -log2(q)
+      case _ if p == 0.0 && q == 1.0 => 9
+      case _ if p == 0.0 => -log2(1 - q)
+      case _ => 9
+    }
   }
 }
