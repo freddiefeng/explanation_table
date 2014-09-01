@@ -5,13 +5,12 @@ import core._
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path, FileSystem}
 import org.apache.spark.SparkContext._
-import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 
 import scala.collection._
 import scala.collection.mutable.ListBuffer
 
-class BroadcastFlashLightETB extends ExplanationTableBuilder {
+class DataCubeETB extends ExplanationTableBuilder {
   var inputDataSize: Long = 0
   var diffThreshold: Double = 0
   var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
@@ -19,8 +18,8 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
   var estimateRDD: RDD[EstimateTuple] = null
   var richSummaryRDD: RDD[RichSummaryTuple] = null
 
-  var sampleTable: Array[DataTuple] = null
-  var bSampleTable: Broadcast[Array[DataTuple]] = null
+  //  var sampleTable: Array[DataTuple] = null
+  //  var bSampleTable: Broadcast[Array[DataTuple]] = null
 
   var LCARDD: RDD[LCATuple] = null
   var aggregatedRDD: RDD[LCATuple] = null
@@ -107,19 +106,37 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
   }
 
   def computeLCA() {
-    val bSampleTable = sc.broadcast(sampleTable)
-    LCARDD = estimateRDD
+    //    val bSampleTable = sc.broadcast(sampleTable)
+    //    LCARDD = estimateRDD
+    //      .flatMap(
+    //        t => {
+    //          val sampleDataTable = bSampleTable.value
+    //          val ret = ListBuffer.empty[(String, Array[Double])]
+    //          sampleDataTable.foreach(
+    //            sample => {
+    //              val pattern = generatePattern(t.dataTuple.attributes, sample.attributes)
+    //              val pair = (pattern.mkString("-"), Array(1.0, t.dataTuple.p, t.q))
+    //              ret += pair
+    //            }
+    //          )
+    //          ret.toList
+    //        }
+    //      )
+//    LCARDD = estimateRDD
+    correctedPatternRDD = estimateRDD
       .flatMap(
         t => {
-          val sampleDataTable = bSampleTable.value
           val ret = ListBuffer.empty[(String, Array[Double])]
-          sampleDataTable.foreach(
-            sample => {
-              val pattern = generatePattern(t.dataTuple.attributes, sample.attributes)
-              val pair = (pattern.mkString("-"), Array(1.0, t.dataTuple.p, t.q))
-              ret += pair
-            }
-          )
+          val pair = (t.dataTuple.attributes.mkString("-"), Array(1.0, t.dataTuple.p, t.q))
+          ret += pair
+          generateAncestors(t.dataTuple.attributes, 0)
+            .toList
+            .foreach(
+              ancestor => {
+                val pair = (ancestor.content.mkString("-"), Array(1.0, t.dataTuple.p, t.q))
+                ret += pair
+              }
+            )
           ret.toList
         }
       )
@@ -130,65 +147,10 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
       )
       .map(
         pair => {
-          LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
-        }
-      )
-    bSampleTable.unpersist()
-  }
-
-  def computeHierarchy() {
-    aggregatedRDD =
-      LCARDD
-        .flatMap(
-          tuple => {
-            generateAncestors(tuple.pattern, 0)
-              .toList
-              .map(
-                key => (key.content.mkString("-"), Array(tuple.count, tuple.p, tuple.q))
-              )
-          }
-        )
-        .reduceByKey(
-          (left, right) => {
-            (left, right).zipped map (_ + _)
-          }
-        )
-        .map(
-          pair => {
-            LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
-          }
-        )
-  }
-
-  def computeCorrectedStats() {
-    val bSampleTable = sc.broadcast(sampleTable)
-    val product = aggregatedRDD
-    correctedPatternRDD = product
-      .flatMap(
-        t => {
-          val sampleDataTable = bSampleTable.value
-          val ret = ListBuffer.empty[(String, Array[Double])]
-          sampleDataTable.foreach(sample => {
-            if (matchPattern(sample.attributes, t.pattern)) {
-              val pair = (t.pattern.mkString("-"), Array(t.p, t.q, t.count, 1))
-              ret += pair
-            }
-          })
-          ret.toList
-        }
-      )
-      .reduceByKey(
-        (left, right) => {
-          left(3) += right(3)
-          left
-        }
-      )
-      .map(
-        pair => {
-          val p = pair._2(0)
-          val q = pair._2(1)
-          val count = pair._2(2).toLong
-          val numSampleMatch = pair._2(3).toInt
+          val count = pair._2(0).toLong
+          val p = pair._2(1)
+          val q = pair._2(2)
+          val numSampleMatch = 1
           val gain = calculateGain(p, q, count, numSampleMatch)
           val t = CorrectedTuple(
             pair._1.split("-"),
@@ -200,11 +162,85 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
             numSampleMatch
           )
           (gain, t)
+//          LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
         }
       )
-      .sortByKey(false, 4)
+      .sortByKey(false)
       .map(pair => pair._2)
-    bSampleTable.unpersist()
+    //    bSampleTable.unpersist()
+  }
+
+  def computeHierarchy() {
+//    aggregatedRDD = LCARDD
+    //    aggregatedRDD =
+    //      LCARDD
+    //        .flatMap(
+    //          tuple => {
+    //            generateAncestors(tuple.pattern, 0)
+    //              .toList
+    //              .map(
+    //                key => (key.content.mkString("-"), Array(tuple.count, tuple.p, tuple.q))
+    //              )
+    //          }
+    //        )
+    //        .reduceByKey(
+    //          (left, right) => {
+    //            (left, right).zipped map (_ + _)
+    //          }
+    //        )
+    //        .map(
+    //          pair => {
+    //            LCATuple(pair._1.split("-"), pair._2(0).toLong, pair._2(1), pair._2(2))
+    //          }
+    //        )
+  }
+
+  def computeCorrectedStats() {
+//    correctedPatternRDD =
+//      aggregatedRDD
+    //    val bSampleTable = sc.broadcast(sampleTable)
+    //    correctedPatternRDD = aggregatedRDD
+    //      .flatMap(
+    //        t => {
+    //          val sampleDataTable = bSampleTable.value
+    //          val ret = ListBuffer.empty[(String, Array[Double])]
+    //          sampleDataTable.foreach(sample => {
+    //            if (matchPattern(sample.attributes, t.pattern)) {
+    //              val pair = (t.pattern.mkString("-"), Array(t.p, t.q, t.count, 1))
+    //              ret += pair
+    //            }
+    //          })
+    //          ret.toList
+    //        }
+    //      )
+    //      .reduceByKey(
+    //        (left, right) => {
+    //          left(3) += right(3)
+    //          left
+    //        }
+    //      )
+    //      .map(
+    //        pair => {
+    //          val p = pair._2(0)
+    //          val q = pair._2(1)
+    //          val count = pair._2(2).toLong
+    //          val numSampleMatch = pair._2(3).toInt
+    //          val gain = calculateGain(p, q, count, numSampleMatch)
+    //          val t = CorrectedTuple(
+    //            pair._1.split("-"),
+    //            count / numSampleMatch,
+    //            p / count,
+    //            q / count,
+    //            gain,
+    //            calculateMultiplier(p, q),
+    //            numSampleMatch
+    //          )
+    //          (gain, t)
+    //        }
+    //      )
+    //      .sortByKey(false, 4)
+    //      .map(pair => pair._2)
+    //    bSampleTable.unpersist()
   }
 
   def iterativeScaling() {
@@ -231,9 +267,9 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
     }
   }
 
-  def measureKL(): Double =  {
+  def measureKL(): Double = {
     iterativeScaling()
-    estimateRDD.map(t => computeKL(t)).reduce(_+_)
+    estimateRDD.map(t => computeKL(t)).reduce(_ + _)
   }
 
   def postProcess() {
@@ -269,30 +305,6 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
     for (i <- 0 until summaryTableSize) {
       start_time = System.currentTimeMillis()
 
-//      breakable {
-//        while (true) {
-//          computeEstimate()
-//          computeRichSummary()
-//
-//          if (richSummaryRDD.count() == 0) {
-//            break
-//          } else {
-//            val topPattern = richSummaryRDD.first()
-//            val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
-//
-//            summaryTable.get(topPattern.id) match {
-//              case Some(pair) => {
-//                pair.multiplier = multiplier
-//                summaryTable.updated(topPattern.id, multiplier)
-//              }
-//              case None => {
-//                Console.err.println("Summary ID not found!")
-//              }
-//            }
-//          }
-//        }
-//      }
-
       iterativeScaling()
 
       end_time = System.currentTimeMillis()
@@ -301,7 +313,7 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
       statOutput ++= "Step 1: Convergence loop done. Time taken:" + (end_time - start_time) + "\n"
 
       start_time = System.currentTimeMillis()
-      sampleTable = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000)).collect()
+      //      sampleTable = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000)).collect()
 
       estimateRDD.cache()
 

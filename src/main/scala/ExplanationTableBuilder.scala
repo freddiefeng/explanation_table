@@ -46,7 +46,8 @@ trait ExplanationTableBuilder {
     conf = new SparkConf()
       .setAppName("Explanation Table")
       .setMaster(sparkMaster)
-      .set("spark.executor.memory", "3g")
+//      .set("spark.executor.memory", "3g")
+//      .set("spark.locality.wait", "900000")
       .set("spark.executor.extraJavaOptions", "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
       .set("spark.eventLog.enabled", "true")
       .set("spark.eventLog.dir", hostAddress + workingDirectory + "/sparkevents")
@@ -56,7 +57,7 @@ trait ExplanationTableBuilder {
 
   def prepareData() {
     val bNumDataFields = sc.broadcast(numDataFields)
-    val sourceData = sc.textFile(hostAddress + workingDirectory + inputDataFileName, 8).cache()
+    val sourceData = sc.textFile(hostAddress + workingDirectory + inputDataFileName, 16)
     inputDataRDD = sourceData
       .map(
         line => {
@@ -64,6 +65,7 @@ trait ExplanationTableBuilder {
           parseInputLine(line, numDataFields)
         }
       )
+    inputDataRDD.cache()
   }
 
   def buildTable()

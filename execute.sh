@@ -6,7 +6,9 @@ sbt package
 #    --master yarn-cluster \
 #    --executor-cores 4 target/scala-2.10/explanation-table_2.10-1.0.jar 2>&1
 
-$SPARK_HOME/bin/spark-submit --class "ExplanationTableApp" --master yarn-cluster target/scala-2.10/explanation-table_2.10-1.0.jar 2>&1
+$SPARK_HOME/bin/spark-submit --class "ExplanationTableApp" \
+    --master yarn-cluster \
+    target/scala-2.10/explanation-table_2.10-1.0.jar 2>&1
 
 #$SPARK_HOME/bin/spark-submit --class org.apache.spark.examples.SparkPi \
 #    --master yarn-cluster \

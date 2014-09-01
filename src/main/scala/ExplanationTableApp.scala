@@ -11,6 +11,7 @@ object ExplanationTableApp {
         case "BroadcastFlashLightETB" => new BroadcastFlashLightETB() with Serializable
         case "BroadcastLaserLightETB" => new BroadcastLaserLightETB() with Serializable
         case "AsyncBroadcastFlashLightETB" => new AsyncBroadcastFlashLightETB() with Serializable
+        case "DataCubeETB" => new DataCubeETB() with Serializable
         case null => throw new RuntimeException("Type of builder not specified in config.")
         case _ => throw new RuntimeException("Type of builder invalid.")
       }
