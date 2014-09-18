@@ -1,9 +1,4 @@
-import java.io.{BufferedWriter, OutputStreamWriter}
-import java.net.URI
-
 import core._
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path, FileSystem}
 import org.apache.spark.SparkContext._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
@@ -14,7 +9,6 @@ import scala.collection.mutable.ListBuffer
 class BroadcastFlashLightETB extends ExplanationTableBuilder {
   var inputDataSize: Long = 0
   var diffThreshold: Double = 0
-  var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
 
   var estimateRDD: RDD[EstimateTuple] = null
   var richSummaryRDD: RDD[RichSummaryTuple] = null
@@ -102,7 +96,8 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
           pair._1 > bDiffThreshold.value(0)
         }
       )
-      .sortByKey(false, 4)
+//      .sortByKey(false, 4)
+      .sortByKey(false)
       .map(pair => pair._2)
   }
 
@@ -210,6 +205,7 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
   def iterativeScaling() {
     while (true) {
       computeEstimate()
+      estimateRDD.cache()
       computeRichSummary()
 
       if (richSummaryRDD.count() == 0) {
@@ -219,14 +215,16 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
         val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
 
         summaryTable.get(topPattern.id) match {
-          case Some(pair) => {
-            pair.multiplier = multiplier
-            summaryTable.updated(topPattern.id, multiplier)
+          case Some(tuple) => {
+            tuple.multiplier = multiplier
+            summaryTable.update(topPattern.id, tuple)
           }
           case None => {
             Console.err.println("Summary ID not found!")
           }
         }
+
+        estimateRDD.unpersist()
       }
     }
   }
@@ -236,27 +234,13 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
     estimateRDD.map(t => computeKL(t)).reduce(_+_)
   }
 
-  def postProcess() {
-    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
-    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
-    bufferedWriter.write("Execution Time by Steps:" + "\n")
-    bufferedWriter.write(statOutput.toString())
-    bufferedWriter.write("Kullback Leibler divergence:" + "\n")
-    bufferedWriter.write(KL.toString + "\n")
-
-    bufferedWriter.close()
-  }
-
   def buildTable() {
+    val entry_time = System.currentTimeMillis()
     var start_time: Long = 0
     var end_time: Long = 0
     loadConfig()
 
-    prepareData()
+    prepareData(128)
     inputDataSize = inputDataRDD.count()
     //    println("Data size: " + inputDataSize + " rows")
     statOutput ++= "Data size: " + inputDataSize + " rows" + "\n"
@@ -300,10 +284,14 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
       println("Step 1: Convergence loop done. Time taken:" + (end_time - start_time))
       statOutput ++= "Step 1: Convergence loop done. Time taken:" + (end_time - start_time) + "\n"
 
+      val currentKL = estimateRDD.map(t => computeKL(t)).reduce(_+_)
+      println("The current KL value:" + currentKL)
+      statOutput ++= "The current KL value:" + currentKL + "\n"
+
       start_time = System.currentTimeMillis()
       sampleTable = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000)).collect()
 
-      estimateRDD.cache()
+//      estimateRDD.cache()
 
       end_time = System.currentTimeMillis()
       println("Step 2: Sampling done. Time taken:" + (end_time - start_time))
@@ -337,6 +325,9 @@ class BroadcastFlashLightETB extends ExplanationTableBuilder {
       println("Step 3: Generate new rules done. Time taken:" + (end_time - start_time))
       statOutput ++= "Step 3: Generate new rules done. Time taken:" + (end_time - start_time) + "\n"
     }
+
+    statOutput ++= "Time spent on explanation table construction: " +
+      (System.currentTimeMillis() - entry_time).toString + "\n"
 
     KL = measureKL()
 

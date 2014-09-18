@@ -11,10 +11,15 @@ case class Pattern (content: Array[String]) extends Tuple {
 
 case class DataTuple (id: Long, p: Short, numDataFields: Int) extends Tuple {
   var attributes: Array[String] = new Array[String](numDataFields)
+  private var _ancestors: List[Long] = null
 
   override def flatten: String = {
     (attributes :+ id.toString :+p.toString :+ numDataFields).mkString(", ")
   }
+
+  def ancestors_= (value: List[Long]):Unit = _ancestors = value
+
+  def ancestors = _ancestors
 }
 
 object DataTuple {
@@ -28,6 +33,12 @@ object DataTuple {
     val ret = DataTuple(id, p, numDataFields)
     ret.attributes = attributes
     ret
+  }
+
+  def apply(flatten: String, ancestors: List[Long]): DataTuple = {
+    val tuple = DataTuple(flatten)
+    tuple.ancestors = ancestors
+    tuple
   }
 }
 
@@ -83,6 +94,20 @@ case class CorrectedTuple
  numMatch: Int) extends Tuple {
   override def flatten = {
     val all = pattern :+ count.toString :+ p :+ q :+ gain :+ multiplier
+    all.mkString(",")
+  }
+}
+
+case class EncodedCorrectedTuple
+(patternHash: Long,
+ count: Long,
+ p: Double,
+ q: Double,
+ gain: Double,
+ multiplier: Double,
+ numMatch: Int) extends Tuple {
+  override def flatten = {
+    val all = patternHash.toString :+ count.toString :+ p :+ q :+ gain :+ multiplier
     all.mkString(",")
   }
 }

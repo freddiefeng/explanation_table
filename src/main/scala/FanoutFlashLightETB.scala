@@ -14,7 +14,6 @@ import scala.collection.mutable.ListBuffer
 class FanoutFlashLightETB extends ExplanationTableBuilder {
   var inputDataSize: Long = 0
   var diffThreshold: Double = 0
-  var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
 
   var estimateRDD: RDD[EstimateTuple] = null
   var richSummaryRDD: RDD[RichSummaryTuple] = null
@@ -219,9 +218,9 @@ class FanoutFlashLightETB extends ExplanationTableBuilder {
         val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
 
         summaryTable.get(topPattern.id) match {
-          case Some(pair) => {
-            pair.multiplier = multiplier
-            summaryTable.updated(topPattern.id, multiplier)
+          case Some(tuple) => {
+            tuple.multiplier = multiplier
+            summaryTable.update(topPattern.id, tuple)
           }
           case None => {
             Console.err.println("Summary ID not found!")
@@ -231,24 +230,9 @@ class FanoutFlashLightETB extends ExplanationTableBuilder {
     }
   }
 
-  def measureKL(): Double =  {
+  def measureKL(): Double = {
     iterativeScaling()
     estimateRDD.map(t => computeKL(t)).reduce(_+_)
-  }
-
-  def postProcess() {
-    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
-    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
-    bufferedWriter.write("Execution Time by Steps:" + "\n")
-    bufferedWriter.write(statOutput.toString())
-    bufferedWriter.write("Kullback Leibler divergence:" + "\n")
-    bufferedWriter.write(KL.toString + "\n")
-
-    bufferedWriter.close()
   }
 
   def buildTable() {

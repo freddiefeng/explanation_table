@@ -1,10 +1,14 @@
+import java.io.{OutputStreamWriter, BufferedWriter}
+import java.net.URI
 import java.util.Properties
 
 import core._
-import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{Path, FileSystem}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkContext, SparkConf}
 
+import scala.collection.mutable
 import scala.util.Random
 
 trait ExplanationTableBuilder {
@@ -27,6 +31,8 @@ trait ExplanationTableBuilder {
 
   var inputDataRDD: RDD[DataTuple] = null
 
+  var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
+
   val rand = new Random(System.currentTimeMillis())
 
   def loadConfig() {
@@ -47,7 +53,7 @@ trait ExplanationTableBuilder {
       .setAppName("Explanation Table")
       .setMaster(sparkMaster)
 //      .set("spark.executor.memory", "3g")
-//      .set("spark.locality.wait", "900000")
+      .set("spark.locality.wait", "30000")
       .set("spark.executor.extraJavaOptions", "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
       .set("spark.eventLog.enabled", "true")
       .set("spark.eventLog.dir", hostAddress + workingDirectory + "/sparkevents")
@@ -55,9 +61,13 @@ trait ExplanationTableBuilder {
     sc = new SparkContext(conf)
   }
 
-  def prepareData() {
+  def prepareData(numPartitions: Int = 0) {
     val bNumDataFields = sc.broadcast(numDataFields)
-    val sourceData = sc.textFile(hostAddress + workingDirectory + inputDataFileName, 16)
+    val sourceData =
+      if (numPartitions == 0)
+        sc.textFile(hostAddress + workingDirectory + inputDataFileName)
+      else
+        sc.textFile(hostAddress + workingDirectory + inputDataFileName, numPartitions)
     inputDataRDD = sourceData
       .map(
         line => {
@@ -69,4 +79,19 @@ trait ExplanationTableBuilder {
   }
 
   def buildTable()
+
+  def postProcess() {
+    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
+    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
+    if (hdfs.exists(path))
+      hdfs.delete(path, true)
+    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
+    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
+    bufferedWriter.write("Execution Time by Steps:" + "\n")
+    bufferedWriter.write(statOutput.toString())
+    bufferedWriter.write("Kullback Leibler divergence:" + "\n")
+    bufferedWriter.write(KL.toString + "\n")
+
+    bufferedWriter.close()
+  }
 }

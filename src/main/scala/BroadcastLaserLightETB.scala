@@ -14,7 +14,6 @@ import scala.collection.mutable.ListBuffer
 class BroadcastLaserLightETB extends ExplanationTableBuilder {
   var inputDataSize: Long = 0
   var diffThreshold: Double = 0
-  var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
 
   var sampleRDD: RDD[DataTuple] = null
 
@@ -63,6 +62,34 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
 //          }
 //        )
 //  }
+
+  def computeEstimate() {
+    val bSummaryTable = sc.broadcast(summaryTable.map(_._2).toArray)
+    estimateRDD =
+      inputDataRDD
+        .flatMap(
+          t => {
+            val summaryTable = bSummaryTable.value
+            val ret = ListBuffer.empty[(String, Double)]
+            summaryTable.foreach(
+              summary => {
+                if (matchPattern(t.attributes, summary.pattern)) {
+                  val pair = (t.flatten, summary.multiplier)
+                  ret += pair
+                }
+              }
+            )
+            ret.toList
+          }
+        )
+        .reduceByKey((left, right) => left + right)
+        .map(
+          pair => {
+            val power2 = Math.pow(2, pair._2)
+            EstimateTuple(DataTuple(pair._1), (power2 / (power2 + 1)).toFloat)
+          }
+        )
+  }
 
   def computeEstimateOnSample() {
     val bSummaryTable = sc.broadcast(summaryTable.map(_._2).toArray)
@@ -225,14 +252,15 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
           (gain, t)
         }
       )
-      .sortByKey(false, 4)
+      .sortByKey(false)
       .map(pair => pair._2)
     bSampleTable.unpersist()
   }
 
-  def iterativeScaling() {
+  def iterativeScalingOnSample() {
     while (true) {
       computeEstimateOnSample()
+      estimateRDD.cache()
       computeRichSummary()
 
       if (richSummaryRDD.count() == 0) {
@@ -242,14 +270,43 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
         val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
 
         summaryTable.get(topPattern.id) match {
-          case Some(pair) => {
-            pair.multiplier = multiplier
-            summaryTable.updated(topPattern.id, multiplier)
+          case Some(tuple) => {
+            tuple.multiplier = multiplier
+            summaryTable.update(topPattern.id, tuple)
           }
           case None => {
             Console.err.println("Summary ID not found!")
           }
         }
+
+        estimateRDD.unpersist()
+      }
+    }
+  }
+
+  def iterativeScaling() {
+    while (true) {
+      computeEstimate()
+      estimateRDD.cache()
+      computeRichSummary()
+
+      if (richSummaryRDD.count() == 0) {
+        return
+      } else {
+        val topPattern = richSummaryRDD.first()
+        val multiplier = scaleMultiplier(topPattern.p, topPattern.q, topPattern.multiplier)
+
+        summaryTable.get(topPattern.id) match {
+          case Some(tuple) => {
+            tuple.multiplier = multiplier
+            summaryTable.update(topPattern.id, tuple)
+          }
+          case None => {
+            Console.err.println("Summary ID not found!")
+          }
+        }
+
+        estimateRDD.unpersist()
       }
     }
   }
@@ -259,22 +316,8 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
     estimateRDD.map(t => computeKL(t)).reduce(_+_)
   }
 
-  def postProcess() {
-    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
-    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
-    bufferedWriter.write("Execution Time by Steps:" + "\n")
-    bufferedWriter.write(statOutput.toString())
-    bufferedWriter.write("Kullback Leibler divergence:" + "\n")
-    bufferedWriter.write(KL.toString + "\n")
-
-    bufferedWriter.close()
-  }
-
   def buildTable() {
+    val entry_time = System.currentTimeMillis()
     var start_time: Long = 0
     var end_time: Long = 0
     loadConfig()
@@ -295,16 +338,20 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
       sampleRDD = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000))
       sampleTable = sampleRDD.collect()
 
-      iterativeScaling()
+      iterativeScalingOnSample()
 
       end_time = System.currentTimeMillis()
 
       println("Step 1: Convergence loop done. Time taken:" + (end_time - start_time))
       statOutput ++= "Step 1: Convergence loop done. Time taken:" + (end_time - start_time) + "\n"
 
+      val currentKL = estimateRDD.map(t => computeKL(t)).reduce(_+_)
+      println("The current KL value:" + currentKL)
+      statOutput ++= "The current KL value:" + currentKL + "\n"
+
       start_time = System.currentTimeMillis()
 
-      estimateRDD.cache()
+//      estimateRDD.cache()
 
       end_time = System.currentTimeMillis()
       println("Step 2: Sampling done. Time taken:" + (end_time - start_time))
@@ -338,6 +385,9 @@ class BroadcastLaserLightETB extends ExplanationTableBuilder {
       println("Step 3: Generate new rules done. Time taken:" + (end_time - start_time))
       statOutput ++= "Step 3: Generate new rules done. Time taken:" + (end_time - start_time) + "\n"
     }
+
+    statOutput ++= "Time spent on explanation table construction: " +
+      (System.currentTimeMillis() - entry_time).toString + "\n"
 
     KL = measureKL()
 

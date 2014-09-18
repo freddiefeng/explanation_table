@@ -19,6 +19,9 @@ package object core {
   }
 
   def calculateDiff(avgP: Float, avgQ: Float, count: Float): Double = {
+    if (avgP == avgQ)
+      return 0.0
+
     (avgP, avgQ) match {
       case (0.0, 1.0) => count
       case (0.0, _) => count * Math.log(1.0 / (1.0 - avgQ)) / Math.log(2)

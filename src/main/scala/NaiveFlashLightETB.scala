@@ -12,7 +12,6 @@ import scala.collection._
 class NaiveFlashLightETB extends ExplanationTableBuilder {
   var inputDataSize: Long = 0
   var diffThreshold: Double = 0
-  var summaryTable: mutable.Map[Int, SummaryTuple] = mutable.Map()
 
   var summaryRDD: RDD[SummaryTuple] = null
   var estimateRDD: RDD[EstimateTuple] = null
@@ -28,8 +27,11 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       topPattern.pattern(i) = "*"
     }
     summaryTable(0) = topPattern
-    val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-    summaryRDD = sc.parallelize(data, 8)
+//    val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+    var data = Array.empty[SummaryTuple]
+    summaryTable.foreach(pair => data :+= pair._2)
+//    summaryRDD = sc.parallelize(data, 8)
+    summaryRDD = sc.parallelize(data)
   }
 
   def computeEstimate() {
@@ -38,7 +40,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       .filter(pair => matchPattern(pair._1.attributes, pair._2.pattern))
 //      .coalesce(8)
       .map(pair => (pair._1.flatten, pair._2.multiplier))
-      .reduceByKey((left, right) => left + right, 8)
+      .reduceByKey((left, right) => left + right)
       .map(
         pair => {
           val power2 = Math.pow(2, pair._2)
@@ -62,8 +64,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
           (pair._2.id, ReductionValue(pair._2.pattern, pair._2.multiplier, pair._1.dataTuple.p, pair._1.q, 1))
       )
       .reduceByKey(
-        (left, right) => ReductionValue(left.pattern, left.multiplier, left.p + right.p, right.q + left.q, left.count + right.count),
-        8
+        (left, right) => ReductionValue(left.pattern, left.multiplier, left.p + right.p, right.q + left.q, left.count + right.count)
       )
       .map(
         pair => {
@@ -78,7 +79,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
           pair._1 > bDiffThreshold.value(0)
         }
       )
-      .sortByKey(false, 8)
+      .sortByKey(false)
       .map(pair => pair._2)
   }
 
@@ -95,7 +96,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       .reduceByKey(
         (left, right) => {
           (left, right).zipped map (_ + _)
-        }, 8
+        }
       )
       .map(
         pair => {
@@ -115,7 +116,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
         .reduceByKey(
           (left, right) => {
             (left, right).zipped map (_ + _)
-          }, 8
+          }
         )
         .map(
           pair => {
@@ -143,7 +144,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
         (left, right) => {
           left(3) += right(3)
           left
-        }, 8
+        }
       )
       .map(
         pair => {
@@ -165,7 +166,8 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
           //          (p, t)
         }
       )
-      .sortByKey(false, 4)
+//      .sortByKey(false, 4)
+      .sortByKey(false)
       .map(pair => pair._2)
   }
 
@@ -176,12 +178,6 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       computeRichSummary()
 
       if (richSummaryRDD.count() == 0) {
-//        estimateRDD.mapPartitions(tuples => {
-//          new java.io.File("/local/logs/userlogs").listFiles
-//            .foreach(file => Runtime.getRuntime().exec("chmod +R 777 " + file.getAbsoluteFile))
-//          tuples
-//        })
-
         return
       } else {
         val topPattern = richSummaryRDD.first()
@@ -189,11 +185,14 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
         println(topPattern.flatten, multiplier)
 
         summaryTable.get(topPattern.id) match {
-          case Some(pair) => {
-            pair.multiplier = multiplier
-            summaryTable.updated(topPattern.id, multiplier)
-            val newSummaries: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-            summaryRDD = sc.parallelize(newSummaries, 8)
+          case Some(tuple) => {
+            tuple.multiplier = multiplier
+            summaryTable.update(topPattern.id, tuple)
+//            val newSummaries: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+            var newSummaries = Array.empty[SummaryTuple]
+            summaryTable.foreach(pair => newSummaries :+= pair._2)
+//            summaryRDD = sc.parallelize(newSummaries, 8)
+            summaryRDD = sc.parallelize(newSummaries)
           }
           case None => {
             Console.err.println("Summary ID not found!")
@@ -203,7 +202,7 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
         estimateRDD.unpersist()
       }
 
-      statOutput ++= "iterative scaling\n"
+//      statOutput ++= "iterative scaling\n"
       reportRunning()
     }
   }
@@ -211,21 +210,6 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
   def measureKL(): Double = {
     iterativeScaling()
     estimateRDD.map(t => computeKL(t)).reduce(_ + _)
-  }
-
-  def postProcess() {
-    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
-    val path = new Path(hostAddress + workingDirectory + "/summary.txt")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    summaryTable.foreach(pair => bufferedWriter.write(pair._2.flatten + "\n"))
-    bufferedWriter.write("Execution Time by Steps:" + "\n")
-    bufferedWriter.write(statOutput.toString())
-    bufferedWriter.write("Kullback Leibler divergence:" + "\n")
-    bufferedWriter.write(KL.toString + "\n")
-
-    bufferedWriter.close()
   }
 
 //  override def prepareData() {
@@ -243,13 +227,13 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
 //  }
 
   def reportRunning(): Unit = {
-    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
-    val path = new Path(hostAddress + workingDirectory + "/running.txt")
-    if (hdfs.exists(path))
-      hdfs.delete(path, true)
-    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
-    bufferedWriter.write(statOutput.toString())
-    bufferedWriter.close()
+//    hdfs = FileSystem.get(new URI(hostAddress), new Configuration())
+//    val path = new Path(hostAddress + workingDirectory + "/running.txt")
+//    if (hdfs.exists(path))
+//      hdfs.delete(path, true)
+//    val bufferedWriter = new BufferedWriter(new OutputStreamWriter(hdfs.create(path, true)))
+//    bufferedWriter.write(statOutput.toString())
+//    bufferedWriter.close()
   }
 
   def buildTable() {
@@ -263,12 +247,6 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
     diffThreshold = inputDataSize / 5000 + 1
     //    println("diffThreshold:" + diffThreshold)
     statOutput ++= "diffThreshold:" + diffThreshold + "\n"
-
-//    inputDataRDD.mapPartitions(tuples => {
-//      new java.io.File("/local/logs/userlogs").listFiles
-//        .foreach(file => Runtime.getRuntime().exec("chmod +R 777 " + file.getAbsoluteFile))
-//      tuples
-//    })
 
     prepareSummary()
 
@@ -285,7 +263,11 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       reportRunning()
 
       start_time = System.currentTimeMillis()
-      sampleRDD = inputDataRDD.sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000))
+//      sampleRDD = inputDataRDD
+//        .sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000))
+//        .repartition(8)
+      sampleRDD = inputDataRDD
+        .sample(false, sampleTableSize.toDouble / inputDataSize, rand.nextInt(50000))
 
       // Cache the two RDD for an expensive join
       sampleRDD.cache()
@@ -317,14 +299,11 @@ class NaiveFlashLightETB extends ExplanationTableBuilder {
       summaryTable(summaryTable.size) = newEntry
 
       //TODO: Refactor the following
-      val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
-      summaryRDD = sc.parallelize(data, 8)
-
-//      summaryRDD.mapPartitions(tuples => {
-//        new java.io.File("/local/logs/userlogs").listFiles
-//          .foreach(file => Runtime.getRuntime().exec("chmod +R 777 " + file.getAbsoluteFile))
-//        tuples
-//      })
+//      val data: Array[SummaryTuple] = summaryTable.map(_._2).toArray
+      var newSummaries = Array.empty[SummaryTuple]
+      summaryTable.foreach(pair => newSummaries :+= pair._2)
+//      summaryRDD = sc.parallelize(newSummaries, 8)
+      summaryRDD = sc.parallelize(newSummaries)
 
       sampleRDD.unpersist()
       estimateRDD.unpersist()
