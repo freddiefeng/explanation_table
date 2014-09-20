@@ -5,15 +5,35 @@ import java.sql.{ResultSet, Statement, DriverManager, Connection}
 import java.util.Properties
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks._
+import scala.sys.process.{ProcessLogger, Process}
 
 object HiveFlashlightETB {
+  object BatchQuery {
+//    val setting =
+//      "set mapreduce.task.io.sort.mb=100;" +
+//      "set hive.optimize.bucketmapjoin.sortedmerge=true;" +
+//      "set hive.auto.convert.join=true;" +
+//      "set hive.auto.convert.sortmerge.join=true;" +
+//      "set hive.auto.convert.sortmerge.join.noconditionaltaks=true;"
+    private var queries: String = ""
+
+    def append(input: String): Unit = {
+      queries += input + "; "
+    }
+
+    def commit() = {
+      Process("hive", Seq("-e", queries))!
+
+      queries = ""
+    }
+  }
+
   val appProperties = new Properties()
   appProperties.load(getClass.getClassLoader.getResourceAsStream("config.properties"))
   val driverName = "org.apache.hive.jdbc.HiveDriver"
   val tableName: String = appProperties.getProperty("tableName")
   var numSummary: Int = appProperties.getProperty("numSummary").toInt
   var numSample: Int = appProperties.getProperty("numSample").toInt
-  var jarPath: String = appProperties.getProperty("jarPath")
   var hiveURL: String = appProperties.getProperty("hiveURL")
 
   var tableSize: Long = 0
@@ -63,6 +83,10 @@ object HiveFlashlightETB {
     stmt.executeUpdate(sql)
   }
 
+  def executeHiveShell(sql: String): Unit = {
+    Process("hive", Seq("-e", sql))!
+  }
+
   def main(args: Array[String]): Unit = {
     try {
       Class.forName(driverName)
@@ -73,30 +97,54 @@ object HiveFlashlightETB {
       }
     }
 
-    val con: Connection = DriverManager.getConnection(hiveURL, "freddie", "")
-    val stmt: Statement = con.createStatement
+//    val con: Connection = DriverManager.getConnection(hiveURL, "g2feng", "")
+//    val stmt: Statement = con.createStatement
     var res: ResultSet = null
-    res = stmt.executeQuery("describe " + tableName)
-    val columnsBuffer = ListBuffer.empty[String]
-    while (res.next) {
-        columnsBuffer += res.getString(1)
-    }
-    val allColumns = columnsBuffer.toList
+//    res = stmt.executeQuery("describe " + tableName)
+
+//    val columnsBuffer = ListBuffer.empty[String]
+//    while (res.next) {
+//        columnsBuffer += res.getString(1)
+//    }
+//    val allColumns = columnsBuffer.toList
+//    val columns = allColumns.filter(field => !(field.equals("id") || field.equals("p")))
+
+    val allColumns = List("id", "p") ++ (1 until 10 toList).map("a" + _)
     val columns = allColumns.filter(field => !(field.equals("id") || field.equals("p")))
 
-    stmt.executeUpdate("add jar " + jarPath)
-    stmt.executeUpdate("CREATE temporary function power_set AS 'etbutil.GenericUDTFPowerSet'")
+    var sql: String = null
 
-    res = stmt.executeQuery("select count(*) from " + tableName)
-    if(res.next()) {
-      tableSize = res.getString(1).toLong
-      println(tableSize)
-      diffThreshold = tableSize / 5000 + 1
-    }
+//    sql = "add jar " + jarPath
+//    println(sql)
+//    stmt.executeUpdate(sql)
+//
+//    sql = "CREATE temporary function power_set AS 'etbutil.GenericUDTFPowerSet'"
+//    println(sql)
+//    stmt.executeUpdate(sql)
 
-    var sql = "drop table " + tableName + "_summary"
+//    sql = "select count(*) from " + tableName
+//    println(sql)
+//    res = stmt.executeQuery(sql)
+//    if(res.next()) {
+//      tableSize = res.getString(1).toLong
+//      println(tableSize)
+//      diffThreshold = tableSize / 5000 + 1
+//    }
+
+    Process("hive", Seq("-e", "select count(*) from " + tableName)) ! ProcessLogger(
+      (o: String) => {
+        println("out " + o)
+        tableSize = o.split("\\s+")(0).trim.toLong
+      },
+      (e: String) => println("err " + e)
+    )
+
+    diffThreshold = tableSize / 5000 + 1
+
+    sql = "drop table " + tableName + "_summary"
     println(sql)
-    stmt.executeUpdate("drop table " + tableName + "_summary")
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     sql =
       "create table " + tableName + "_summary(" +
@@ -109,17 +157,23 @@ object HiveFlashlightETB {
       "kl float" +
       ") ROW FORMAT DELIMITED FIELDS TERMINATED BY \",\" TBLPROPERTIES('serialization.null.format'='')"
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     sql = "drop table " + tableName + "_sample"
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
+
     sql =
       "create table " + tableName + "_sample(" +
       columns.map(_ + " string, ").reduce(_+_).dropRight(2) +
       ")"
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
 
     //    stmt.executeUpdate()
     val summaryTable = tableName + "_summary"
@@ -133,7 +187,10 @@ object HiveFlashlightETB {
 
     sql = "drop view " + estimateView
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
+
     val dataCols = columns.map(tableName + "." + _)
     var summCols = columns.map(summaryTable + "." + _)
     var where = (dataCols, summCols)
@@ -152,11 +209,16 @@ object HiveFlashlightETB {
     sql = composeViewSql(tableName, "estimate", select, from, where, groupBy)
 
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
 
     sql = "drop view " + maxpatsView
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
+
     var estimateCols = columns.map(estimateView + "." + _)
     val sampleCols = columns.map(sampleTable + "." + _)
     select = (columns, estimateCols, sampleCols)
@@ -173,7 +235,7 @@ object HiveFlashlightETB {
     from = estimateView + ", " + sampleTable
     where = null
     groupBy = null
-    var subquery = "(SELECT " + select + " FROM "+ from + ") AS tmp "
+    val subquery = "(SELECT " + select + " FROM "+ from + ") AS tmp "
 
     //Maxpats
     select = columns.map("o" + _ + ", ").reduce(_+_) + "count(*) as oct, sum(q) as sumq,sum(p) as sump"
@@ -183,7 +245,9 @@ object HiveFlashlightETB {
     sql = composeViewSql(tableName, "maxpats", select, from, where, groupBy)
 
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+//    executeHiveShell(sql)
+    BatchQuery.append(sql)
 
     //Subsets
     sql = "CREATE VIEW " + subsetView + " AS " +
@@ -193,9 +257,13 @@ object HiveFlashlightETB {
       columns.map("p" + _ + ", ").reduce(_+_).dropRight(2)
 
     println("drop view " + subsetView)
-    stmt.executeUpdate("drop view " + subsetView)
+//    stmt.executeUpdate("drop view " + subsetView)
+//    executeHiveShell("drop view " + subsetView)
+    BatchQuery.append("drop view " + subsetView)
+
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     //Aggpats
     select = columns.map(_ + ", ").reduce(_+_) + " sum(oct) as ct, sum(sump) as p, sum(sumq) as q "
@@ -205,9 +273,11 @@ object HiveFlashlightETB {
     sql = composeViewSql(tableName, "aggpats", select, from, where, groupBy)
 
     println("drop view " + aggpatView)
-    stmt.executeUpdate("drop view " + aggpatView)
+//    stmt.executeUpdate("drop view " + aggpatView)
+    BatchQuery.append("drop view " + aggpatView)
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     //Corrected
     select = columns.map("pat." + _ + ", ").reduce(_+_) +
@@ -235,9 +305,11 @@ object HiveFlashlightETB {
     sql = composeViewSql(tableName, "corrected", select, from, where, groupBy)
 
     println("drop view " + correctedView)
-    stmt.executeUpdate("drop view " + correctedView)
+    BatchQuery.append("drop view " + correctedView)
+
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     //Richsummary
     select = columns.map("summ." + _ + ", ").reduce(_+_) + "summ.id,summ.multiplier,avg(p) as p, avg(q) as q, count(*) as ct,"+
@@ -258,13 +330,16 @@ object HiveFlashlightETB {
     sql = composeViewSql(tableName, "richsummary", select, from, where, groupBy)
 
     println("drop view " + richSummaryView)
-    stmt.executeUpdate("drop view " + richSummaryView)
+    BatchQuery.append("drop view " + richSummaryView)
+
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
     sql = "truncate table " + tableName + "_summary"
     println("truncate table " + tableName + "_summary")
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
 
 //    Main algorithm starts here
     val temp: File = File.createTempFile("temp",".csv")
@@ -275,7 +350,10 @@ object HiveFlashlightETB {
 
     sql = "LOAD DATA LOCAL INPATH '" + temp.getAbsolutePath + "' INTO TABLE " + summaryTable
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
+
+    BatchQuery.commit()
 
     var tcquery = 0
     var tsnsr =0
@@ -284,61 +362,69 @@ object HiveFlashlightETB {
 
     var t0 = System.currentTimeMillis()
 
+    var out = Array.empty[String]
+    val logger = ProcessLogger(
+      (o: String) => {
+        println("out " + o)
+        out = o.split("\\s+")
+      },
+      (e: String) => println("err " + e)
+    )
+
     println("----------------------------------------------------\nExplanation table:")
     println("----------------------------------------------------")
 
     sql = "DROP TABLE IF EXISTS temp"
     println(sql)
-    stmt.executeUpdate(sql)
-    sql = "CREATE TABLE IF NOT EXISTS temp(id bigint, p float, q float, diff float) ROW FORMAT DELIMITED FIELDS TERMINATED BY \",\""
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
+
+    sql = "CREATE TABLE IF NOT EXISTS temp(id bigint, p float, q float, diff float) ROW FORMAT DELIMITED FIELDS TERMINATED BY ','"
     println(sql)
-    stmt.executeUpdate(sql)
+//    stmt.executeUpdate(sql)
+    BatchQuery.append(sql)
+
+    BatchQuery.commit()
 
     for (curNumRules <- 1 to numSummary) {
       var ts = System.currentTimeMillis()
       sql = "TRUNCATE TABLE " + tableName + "_sample"
       println(sql)
-      stmt.executeUpdate(sql)
+//      stmt.executeUpdate(sql)
+      BatchQuery.append(sql)
 
       var ta = System.currentTimeMillis()
 
-//      println("select id,p,q from " + richSummaryView +
-//        " where diff > " + diffThreshold.toString + " order by diff desc limit 1")
-//
-//      res = stmt.executeQuery("select id,p,q,diff from " + richSummaryView +
-//      " where diff > " + diffThreshold.toString + " order by diff desc limit 1")
-
       sql = "TRUNCATE TABLE temp"
       println(sql)
-      stmt.executeUpdate(sql)
+//      stmt.executeUpdate(sql)
+      BatchQuery.append(sql)
+
+      BatchQuery.commit()
+
       breakable {
         while(true) {
-          //        sql = "update " + summaryTable +
-          //          " SET multiplier = " + MultiplierFormula +
-          //          " FROM (select id,p,q from " + richSummaryView +
-          //          " where diff > " + diffThreshold.toString + " order by diff desc limit 1) as t where t.id = " +
-          //          summaryTable + ".id"
-          //
-          //        stmt.executeUpdate(sql)
           sql = "FROM " + richSummaryView + " INSERT OVERWRITE TABLE temp SELECT id, p, q, diff " +
             " WHERE " + "diff > " + diffThreshold.toString +
             " ORDER BY " + "diff DESC LIMIT 1"
           println(sql)
-          stmt.executeUpdate(sql)
+//          stmt.executeUpdate(sql)
+          BatchQuery.append(sql)
+          BatchQuery.commit()
 
           sql = "SELECT id, p, q, diff FROM temp"
-          res = stmt.executeQuery(sql)
+//          res = stmt.executeQuery(sql)
+          Process("hive", Seq("-e", sql)) ! logger
 
-          if (res.next()) {
-//            val numOutputRow = res.getInt(1)
-//            println("numOutputRow: " + numOutputRow)
-//            if (numOutputRow < 1) {
-//              break
-//            }
-            println(res.getString("id"))
-            println(res.getString("p"))
-            println(res.getString("q"))
-            println(res.getString("diff"))
+//          sys.exit()
+
+          if (out.length == 4) {
+//            println(res.getString("id"))
+//            println(res.getString("p"))
+//            println(res.getString("q"))
+//            println(res.getString("diff"))
+
+            out.foreach(println(_))
 
 //            sql = "UPDATE " + summaryTable +
 //              " SET multiplier = " + MultiplierFormula +
@@ -351,8 +437,10 @@ object HiveFlashlightETB {
               " ELSE multiplier END\n AS multiplier, s.gain, s.id, s.kl " +
               " FROM " + summaryTable + " s, temp"
             println(sql)
-            stmt.executeUpdate(sql)
+            BatchQuery.append(sql)
+            BatchQuery.commit()
 
+            out = Array.empty[String]
           } else {
             break()
           }
@@ -362,12 +450,14 @@ object HiveFlashlightETB {
       ts = System.currentTimeMillis()
       println("finished big convergence loop: " + (ts - ta))
 
+
       ta = System.currentTimeMillis()
       sql = "INSERT INTO TABLE " + sampleTable +
             " SELECT " + columns.map(_ + ", ").reduce(_+_).dropRight(2) + " FROM " + estimateView +
             " TABLESAMPLE (" + numSample.toDouble / tableSize.toDouble + " PERCENT) s"
       println(sql)
-      stmt.executeUpdate(sql)
+//      stmt.executeUpdate(sql)
+      executeHiveShell(sql)
       ts = System.currentTimeMillis()
       println("finished sampling: " + (ts - ta))
 
@@ -376,38 +466,43 @@ object HiveFlashlightETB {
       " SELECT " + columns.map("top." + _ + ", ").reduce(_+_) + "top.newct, top.q, top.multiplier, 0, " + curNumRules + ", 999999 " +
       " FROM (SELECT * FROM " + correctedView + " ORDER BY gain DESC LIMIT 1) top "
       println(sql)
-      stmt.executeUpdate(sql)
+
+//      Process("hive", Seq("-e", "\"DROP FUNCTION IF EXISTS power_set;" +
+//        "CREATE temporary function power_set AS 'etbutil.GenericUDTFPowerSet' USING JAR \'" + jarPath + "\';" +
+//        sql))!
+
+      executeHiveShell(sql)
 
       ts = System.currentTimeMillis()
       println("finished new summary: " + (ts - ta))
 
-      println("SELECT * FROM " + summaryTable + " WHERE id = " + curNumRules)
-      res = stmt.executeQuery(
-        "SELECT * FROM " + summaryTable + " WHERE id = " + curNumRules
-      )
-      val rsmd = res.getMetaData
-
-      val numberOfColumns = rsmd.getColumnCount
-
-      for (j <- 1 to numberOfColumns) {
-        if (j > 1) System.out.print(",  ")
-        val columnName = rsmd.getColumnName(j)
-        System.out.print(columnName)
-      }
-
-      System.out.println("")
-
-      while (res.next()) {
-        for (j <- 1 to numberOfColumns) {
-          if (j > 1) System.out.print(",  ")
-          val columnValue = res.getString(j)
-          System.out.print(columnValue)
-        }
-        System.out.println("")
-      }
+//      println("SELECT * FROM " + summaryTable + " WHERE id = " + curNumRules)
+//      res = stmt.executeQuery(
+//        "SELECT * FROM " + summaryTable + " WHERE id = " + curNumRules
+//      )
+//      val rsmd = res.getMetaData
+//
+//      val numberOfColumns = rsmd.getColumnCount
+//
+//      for (j <- 1 to numberOfColumns) {
+//        if (j > 1) System.out.print(",  ")
+//        val columnName = rsmd.getColumnName(j)
+//        System.out.print(columnName)
+//      }
+//
+//      System.out.println("")
+//
+//      while (res.next()) {
+//        for (j <- 1 to numberOfColumns) {
+//          if (j > 1) System.out.print(",  ")
+//          val columnValue = res.getString(j)
+//          System.out.print(columnValue)
+//        }
+//        System.out.println("")
+//      }
     }
 
-    stmt.close()
-    con.close()
+//    stmt.close()
+//    con.close()
   }
 }
